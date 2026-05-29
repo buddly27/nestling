@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nestling</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: #000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      color: #e6edf3;
+    }
+
+    /* ── Video ─────────────────────────────────────────────────────────── */
+    #feed {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: none;
+    }
+
+    #placeholder {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #484f58;
+      font-size: 15px;
+    }
+
+    /* ── Top bar ────────────────────────────────────────────────────────── */
+    #top-bar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 48px;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      gap: 10px;
+      z-index: 20;
+      transition: opacity 0.35s, transform 0.35s;
+    }
+    #top-bar.hidden {
+      opacity: 0;
+      transform: translateY(-100%);
+      pointer-events: none;
+    }
+
+    .tb-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 15px;
+      font-weight: 600;
+      color: #f0f6fc;
+      flex-shrink: 0;
+    }
+    .tb-center {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .tb-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    select {
+      background: rgba(22, 27, 34, 0.9);
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #e6edf3;
+      font-size: 13px;
+      padding: 5px 8px;
+      min-width: 0;
+      max-width: 240px;
+      flex: 1 1 160px;
+      cursor: pointer;
+    }
+    select:focus { outline: none; border-color: #58a6ff; }
+    select:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    button {
+      border-radius: 6px;
+      border: 1px solid #30363d;
+      background: rgba(33, 38, 45, 0.85);
+      color: #e6edf3;
+      cursor: pointer;
+      font-size: 13px;
+      padding: 5px 14px;
+      transition: background 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    button:hover:not(:disabled) { background: rgba(48, 54, 61, 0.9); border-color: #8b949e; }
+    button:disabled { opacity: 0.38; cursor: not-allowed; }
+
+    #btn-start { background: rgba(35, 134, 54, 0.85); border-color: #2ea043; color: #fff; }
+    #btn-start:hover:not(:disabled) { background: rgba(46, 160, 67, 0.9); }
+    #btn-stop  { background: rgba(182, 35, 36, 0.85); border-color: #da3633; color: #fff; }
+    #btn-stop:hover:not(:disabled)  { background: rgba(218, 54, 51, 0.9); }
+
+    label.remember {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      color: #8b949e;
+      cursor: pointer;
+      user-select: none;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    label.remember input { cursor: pointer; accent-color: #58a6ff; }
+
+    #live-dot {
+      font-size: 13px;
+      color: #484f58;
+      letter-spacing: -1px;
+    }
+    #live-dot.live         { color: #3fb950; }
+    #live-dot.connecting   { color: #d29922; }
+    #live-dot.reconnecting { color: #d29922; }
+    #live-dot.lost         { color: #f85149; }
+    #live-dot.error        { color: #f85149; }
+  </style>
+</head>
+<body>
+
+<video id="feed" autoplay playsinline muted></video>
+<div id="placeholder">No stream active</div>
+
+<div id="top-bar">
+  <div class="tb-left">Nestling</div>
+  <div class="tb-center">
+    <select id="picker"></select>
+    <button id="btn-start" disabled>Start</button>
+    <button id="btn-stop"  disabled>Stop</button>
+    <label class="remember"><input type="checkbox" id="remember"> Remember</label>
+  </div>
+  <div class="tb-right">
+    <span id="live-dot">●</span>
+  </div>
+</div>
+
+<script>
+  // ---------------------------------------------------------------------------
+  // DOM refs
+  // ---------------------------------------------------------------------------
+  const feed        = document.getElementById('feed');
+  const placeholder = document.getElementById('placeholder');
+  const picker      = document.getElementById('picker');
+  const btnStart    = document.getElementById('btn-start');
+  const btnStop     = document.getElementById('btn-stop');
+  const topBar      = document.getElementById('top-bar');
+  const liveDot     = document.getElementById('live-dot');
+  const rememberChk = document.getElementById('remember');
+
+  // ---------------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------------
+  const STORAGE_KEY = 'nestling_device';
+
+  let currentDevice = null;
+  let pc            = null;   // RTCPeerConnection for the active stream
+  let hideTimer     = null;
+
+  // ---------------------------------------------------------------------------
+  // Top-bar auto-hide
+  // ---------------------------------------------------------------------------
+  function scheduleHide() {
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(function() {
+      if (currentDevice) topBar.classList.add('hidden');
+    }, 3000);
+  }
+
+  function revealTopBar() {
+    topBar.classList.remove('hidden');
+    scheduleHide();
+  }
+
+  document.addEventListener('mousemove', revealTopBar);
+  document.addEventListener('touchstart', revealTopBar);
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+  function makeOption(value, text) {
+    const opt = document.createElement('option');
+    opt.value       = value;
+    opt.textContent = text;
+    return opt;
+  }
+
+  function setPickerPlaceholder(text) {
+    picker.replaceChildren(makeOption('', text));
+  }
+
+  function setLiveDot(text, cls) {
+    liveDot.textContent = text;
+    liveDot.className   = cls || '';
+  }
+
+  // ---------------------------------------------------------------------------
+  // WebRTC stream setup / teardown
+  // ---------------------------------------------------------------------------
+  async function setupWebRTC(device) {
+    pc = new RTCPeerConnection({ iceServers: [] });
+    pc.addTransceiver('video', { direction: 'recvonly' });
+
+    pc.ontrack = function(e) {
+      feed.srcObject        = e.streams[0];
+      feed.style.display    = 'block';
+      placeholder.style.display = 'none';
+      setLiveDot('● Live', 'live');
+    };
+
+    pc.onconnectionstatechange = function() {
+      if (!pc) return;
+      if (pc.connectionState === 'failed') {
+        setLiveDot('● Connection failed', 'error');
+      } else if (pc.connectionState === 'disconnected') {
+        setLiveDot('● Disconnected', 'lost');
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    // Wait for ICE gathering to complete (non-trickle — send one complete offer).
+    await new Promise(function(resolve) {
+      if (pc.iceGatheringState === 'complete') {
+        resolve();
+      } else {
+        function onGather() {
+          if (pc.iceGatheringState === 'complete') {
+            pc.removeEventListener('icegatheringstatechange', onGather);
+            resolve();
+          }
+        }
+        pc.addEventListener('icegatheringstatechange', onGather);
+      }
+    });
+
+    const resp = await fetch('/webrtc/offer', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ device, sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+    });
+    if (!resp.ok) throw new Error(await resp.text().catch(function() { return resp.statusText; }));
+
+    const answer = await resp.json();
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+  }
+
+  function teardownWebRTC() {
+    if (pc) { pc.close(); pc = null; }
+    feed.srcObject        = null;
+    feed.style.display    = 'none';
+    placeholder.style.display = '';
+    placeholder.textContent   = 'No stream active';
+  }
+
+  // ---------------------------------------------------------------------------
+  // Camera state machine
+  // ---------------------------------------------------------------------------
+  function enterLive(device) {
+    currentDevice     = device;
+    setLiveDot('● Connecting…', 'connecting');
+    btnStart.disabled = true;
+    btnStop.disabled  = false;
+    picker.disabled   = true;
+    scheduleHide();
+    setupWebRTC(device).catch(function(err) {
+      console.error('WebRTC setup failed:', err);
+      setLiveDot('● Error', 'error');
+    });
+  }
+
+  function enterIdle() {
+    currentDevice = null;
+    teardownWebRTC();
+    setLiveDot('●', '');
+    btnStart.disabled = !picker.value;
+    btnStop.disabled  = true;
+    picker.disabled   = false;
+    topBar.classList.remove('hidden');
+    clearTimeout(hideTimer);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Picker / Remember / Start / Stop
+  // ---------------------------------------------------------------------------
+  picker.addEventListener('change', function() { btnStart.disabled = !picker.value; });
+
+  rememberChk.addEventListener('change', function() {
+    if (!rememberChk.checked) localStorage.removeItem(STORAGE_KEY);
+  });
+
+  btnStart.addEventListener('click', async function() {
+    const device = picker.value;
+    if (!device) return;
+    setLiveDot('● Connecting…', 'connecting');
+    btnStart.disabled = true;
+    btnStop.disabled  = true;
+    picker.disabled   = true;
+    try {
+      const resp = await fetch('/camera/start?device=' + encodeURIComponent(device), { method: 'POST' });
+      if (!resp.ok) {
+        const msg = await resp.text().catch(function() { return resp.statusText; });
+        setLiveDot('● Error', 'error');
+        btnStart.disabled = false;
+        picker.disabled   = false;
+        console.error('camera/start failed:', msg);
+        return;
+      }
+      if (rememberChk.checked) localStorage.setItem(STORAGE_KEY, device);
+      enterLive(device);
+    } catch (err) {
+      setLiveDot('● Error', 'error');
+      btnStart.disabled = false;
+      picker.disabled   = false;
+      console.error('camera/start error:', err);
+    }
+  });
+
+  btnStop.addEventListener('click', async function() {
+    const device = currentDevice || picker.value;
+    if (!device) return;
+    btnStop.disabled = true;
+    try {
+      await fetch('/camera/stop?device=' + encodeURIComponent(device), { method: 'POST' });
+    } catch (_) { /* best-effort */ }
+    enterIdle();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Startup
+  // ---------------------------------------------------------------------------
+  async function loadDevices() {
+    setPickerPlaceholder('Loading cameras…');
+    try {
+      const resp = await fetch('/devices');
+      if (!resp.ok) throw new Error(resp.statusText);
+      const data    = await resp.json();
+      const devices = data.devices || [];
+      picker.replaceChildren(makeOption('', 'Select a camera…'));
+      for (const d of devices) {
+        const name       = d.name || '';
+        const customName = d.traits
+          && d.traits['sdm.devices.traits.Info']
+          && d.traits['sdm.devices.traits.Info'].customName;
+        const displayName = customName || d.displayName || name.split('/').pop() || name;
+        picker.appendChild(makeOption(name, displayName));
+      }
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const match = Array.prototype.find.call(picker.options, function(o) { return o.value === saved; });
+        if (match) {
+          picker.value        = saved;
+          rememberChk.checked = true;
+          btnStart.disabled   = false;
+          await restoreLiveState(saved);
+        }
+      }
+    } catch (err) {
+      setPickerPlaceholder('Failed to load cameras');
+      console.error('devices fetch error:', err);
+    }
+  }
+
+  async function restoreLiveState(device) {
+    try {
+      const resp = await fetch('/camera/status?device=' + encodeURIComponent(device));
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (data.running) enterLive(device);
+    } catch (_) { /* stay idle */ }
+  }
+
+  loadDevices();
+</script>
+</body>
+</html>
